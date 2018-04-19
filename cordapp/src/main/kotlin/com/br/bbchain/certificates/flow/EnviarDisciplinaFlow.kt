@@ -1,13 +1,13 @@
 package com.br.bbchain.certificates.flow
 
+import co.paralleluniverse.fibers.Suspendable
+import com.br.bbchain.certificates.contract.DisciplinaContract
 import com.br.bbchain.certificates.model.Disciplina
 import com.br.bbchain.certificates.state.DisciplinaState
-import net.corda.core.contracts.Requirements.using
+import net.corda.core.contracts.Command
 import net.corda.core.contracts.UniqueIdentifier
 import net.corda.core.contracts.requireThat
-import net.corda.core.flows.CollectSignaturesFlow
-import net.corda.core.flows.FinalityFlow
-import net.corda.core.flows.FlowLogic
+import net.corda.core.flows.*
 import net.corda.core.identity.Party
 import net.corda.core.node.services.queryBy
 import net.corda.core.node.services.vault.QueryCriteria
@@ -17,8 +17,10 @@ import java.util.*
 
 object EnviarDisciplinaFlow {
 
+    @InitiatingFlow
     class ReqFlow(val disciplinaId: UUID, val para: Party): FlowLogic<SignedTransaction>() {
 
+        @Suspendable
         override fun call(): SignedTransaction {
 
             val disciplinaStateAndRef = serviceHub.vaultService.queryBy<DisciplinaState>(
@@ -26,16 +28,21 @@ object EnviarDisciplinaFlow {
                             linearId = listOf(UniqueIdentifier(id = disciplinaId))))
                     .states.single()
 
+            val notary = disciplinaStateAndRef.state.notary
+
             val disciplinaState = disciplinaStateAndRef.state.data
 
             val novoDisciplinaState = disciplinaState.copy(faculdadesReceptoras =
                         disciplinaState.faculdadesReceptoras + para)
 
-            val txBuilder = TransactionBuilder()
+            val comando = Command(DisciplinaContract.Commands.EnviarDisciplina(),
+                    novoDisciplinaState.participants.map { it.owningKey })
+
+            val txBuilder = TransactionBuilder(notary)
 
             txBuilder.addInputState(disciplinaStateAndRef)
-            txBuilder.addOutputState(novoDisciplinaState, "")
-
+            txBuilder.addOutputState(novoDisciplinaState, DisciplinaContract::class.java.canonicalName)
+            txBuilder.addCommand(comando)
             txBuilder.verify(serviceHub)
 
             val transacaoParcialmenteAssinada = serviceHub.signInitialTransaction(txBuilder)
@@ -48,7 +55,6 @@ object EnviarDisciplinaFlow {
 
             return subFlow(FinalityFlow(transacaoTotalmenteAssinada))
 
-
         }
 
         fun validarDisciplina(disciplina: Disciplina){
@@ -60,10 +66,21 @@ object EnviarDisciplinaFlow {
 
     }
 
-    class RespFlow(): FlowLogic<SignedTransaction>() {
+    @InitiatedBy(ReqFlow::class)
+    class RespFlow(val session: FlowSession): FlowLogic<SignedTransaction>() {
 
+        @Suspendable
         override fun call(): SignedTransaction {
-            TODO("not implemented") //To change body of created functions use File | Settings | File Templates.
+            val signTransactionFlow = object : SignTransactionFlow(session) {
+                override fun checkTransaction(stx: SignedTransaction) =
+                        requireThat {
+                    val outputs = stx.coreTransaction.outputsOfType<DisciplinaState>()
+                    "Tinha que ter recebido Disciplinas!" using outputs.isNotEmpty()
+                    "As disciplinas não podem ser emitidas no meu nome." using outputs.all { it.disciplina.faculdade != ourIdentity }
+                }
+            }
+
+            return subFlow(signTransactionFlow)
         }
 
     }
